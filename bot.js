@@ -27,7 +27,7 @@ function log(msg) {
   const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
   console.log(line);
   fs.appendFileSync(logPath, line + "\n");
-  emitLog(line); // <-- socket.io emit bhi karega
+  emitLog(line);
 }
 
 // Load AppState
@@ -122,6 +122,16 @@ function emitStatus() {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => log(`🌐 API Server running on port ${PORT}`));
 
+// Utility: Promise wrapper for changeNickname
+function setNickSafe(nick, threadID, uid) {
+  return new Promise((resolve) => {
+    api.changeNickname(nick, threadID, uid, (err) => {
+      if (err) log(`❌ Nick change failed for ${uid}: ${err}`);
+      resolve();
+    });
+  });
+}
+
 // --- Bot Function ---
 function startBot() {
   login(
@@ -187,7 +197,25 @@ function startBot() {
               log(`📩 ${senderID}: ${event.body} (Group: ${threadID})`);
             }
 
-            // Commands handling (same as before)
+            // 🆘 HELP (without prefix)
+            if (body === "help" && senderID === BOSS_UID) {
+              const helpMsg = `
+📜 𝗔𝗩𝗔𝗜𝗟𝗔𝗕𝗟𝗘 𝗖𝗢𝗠𝗠𝗔𝗡𝗗𝗦 📜
+
+🔒 /gclock <name>   → Lock group name
+🧹 /gcremove        → Remove GC name + Auto-remove ON
+🔐 /nicklock on <nick> → Lock nickname
+🔓 /nicklock off    → Unlock nickname
+💥 /nickremoveall   → Remove all nicknames + Auto-remove ON
+🛑 /nickremoveoff   → Stop auto nick remove
+📊 /status          → Show current bot status
+help                → Show this help menu (no prefix needed)
+
+👉 Just type command as shown. Some need values after them.
+`;
+              api.sendMessage(helpMsg.trim(), threadID);
+            }
+
             // 🔒 Group Lock
             if (body.startsWith("/gclock") && senderID === BOSS_UID) {
               try {
@@ -251,7 +279,7 @@ function startBot() {
               try {
                 const info = await api.getThreadInfo(threadID);
                 for (const u of info.userInfo) {
-                  await api.changeNickname(lockedNick, threadID, String(u.id));
+                  await setNickSafe(lockedNick, threadID, String(u.id));
                 }
                 api.sendMessage(`🔐 Nickname locked: "${lockedNick}"`, threadID);
                 emitStatus();
@@ -275,7 +303,7 @@ function startBot() {
               try {
                 const info = await api.getThreadInfo(threadID);
                 for (const u of info.userInfo) {
-                  await api.changeNickname("", threadID, String(u.id));
+                  await setNickSafe("", threadID, String(u.id));
                 }
                 api.sendMessage("💥 Nicknames cleared. Auto-remove ON", threadID);
                 emitStatus();
@@ -298,18 +326,23 @@ function startBot() {
               const newNick = event.logMessageData.nickname || "";
 
               if (nickLockEnabled && newNick !== lockedNick) {
-                try {
-                  await api.changeNickname(lockedNick, threadID, String(changedUID));
-                } catch (e) {
-                  log("❌ Failed reverting nickname: " + e);
-                }
+                await setNickSafe(lockedNick, threadID, String(changedUID));
               }
 
               if (nickRemoveEnabled && newNick !== "") {
+                await setNickSafe("", threadID, String(changedUID));
+              }
+            }
+
+            // 🚨 Anti-out (auto add back)
+            if (event.logMessageType === "log:unsubscribe") {
+              const leftUID = event.logMessageData.leftParticipantFbId || event.logMessageData.leftParticipantId;
+              if (leftUID && threadID === GROUP_THREAD_ID) {
                 try {
-                  await api.changeNickname("", threadID, String(changedUID));
+                  await api.addUserToGroup(leftUID, threadID);
+                  log(`🚨 Anti-out: Added back ${leftUID}`);
                 } catch (e) {
-                  log("❌ Failed auto-remove nickname: " + e);
+                  log("❌ Failed anti-out re-add: " + e);
                 }
               }
             }
