@@ -1,7 +1,7 @@
 const express = require('express');
 const fs = require('fs');
-const { fork } = require('child_process');
 const path = require('path');
+const { fork } = require('child_process');
 const http = require('http');
 const { Server } = require('socket.io');
 
@@ -18,10 +18,10 @@ app.use(express.static('public'));
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-// UID -> child process
+// UID -> child process mapping
 let processes = {};
 
-// socket.io: clients must emit('join', uid) to receive logs for that uid
+// Socket.io for live logs
 io.on('connection', (socket) => {
   socket.on('join', (uid) => {
     socket.join(uid);
@@ -31,13 +31,13 @@ io.on('connection', (socket) => {
 function appendLog(userDir, text) {
   try {
     const logFile = path.join(userDir, 'logs.txt');
-    fs.appendFileSync(logFile, text);
+    fs.appendFileSync(logFile, text + "\n");
   } catch (e) {
     console.error('Failed writing logs:', e);
   }
 }
 
-// Start bot
+// --- Start bot ---
 app.post('/start-bot', (req, res) => {
   const { appstate, admin } = req.body;
   if (!appstate || !admin) return res.status(400).send('❌ AppState or UID missing');
@@ -54,7 +54,6 @@ app.post('/start-bot', (req, res) => {
   if (!fs.existsSync(userDir)) fs.mkdirSync(userDir, { recursive: true });
 
   try {
-    // Accept appstate as string or object
     const appStateObj = typeof appstate === 'string' ? JSON.parse(appstate) : appstate;
     fs.writeFileSync(path.join(userDir, 'appstate.json'), JSON.stringify(appStateObj, null, 2));
     fs.writeFileSync(path.join(userDir, 'admin.txt'), String(admin));
@@ -62,12 +61,12 @@ app.post('/start-bot', (req, res) => {
     const logPath = path.join(userDir, 'logs.txt');
     fs.writeFileSync(logPath, `📂 Logs started at ${new Date().toISOString()}\n`);
 
-    // Kill previous if running
+    // Kill previous process
     if (processes[admin]) {
       try { processes[admin].kill(); } catch (e) {}
     }
 
-    // Fork bot.js as a child process and pipe its stdout/stderr
+    // Fork bot.js
     const child = fork(path.join(__dirname, 'bot.js'), [String(admin)], { silent: true });
 
     child.stdout.on('data', (data) => {
@@ -83,7 +82,7 @@ app.post('/start-bot', (req, res) => {
     });
 
     child.on('exit', (code) => {
-      const msg = `\n🔴 Bot exited with code ${code} at ${new Date().toISOString()}\n`;
+      const msg = `🔴 Bot exited with code ${code} at ${new Date().toISOString()}`;
       appendLog(userDir, msg);
       io.to(String(admin)).emit('botlog', msg);
       delete processes[admin];
@@ -98,7 +97,7 @@ app.post('/start-bot', (req, res) => {
   }
 });
 
-// Stop bot
+// --- Stop bot ---
 app.get('/stop-bot', (req, res) => {
   const { uid } = req.query;
   if (!uid) return res.status(400).send('❌ UID missing.');
@@ -112,15 +111,13 @@ app.get('/stop-bot', (req, res) => {
   }
 });
 
-// Return logs
+// --- Fetch logs ---
 app.get('/logs', (req, res) => {
-  const uid = req.query.uid;
+  const { uid } = req.query;
   if (!uid) return res.status(400).send('❌ UID missing.');
-  const logPath = path.join(USERS_DIR, String(uid), 'logs.txt');
-  if (!fs.existsSync(logPath)) return res.send('📭 No logs yet.');
-  res.type('text/plain').send(fs.readFileSync(logPath, 'utf8'));
+  const logFile = path.join(USERS_DIR, String(uid), 'logs.txt');
+  if (!fs.existsSync(logFile)) return res.send('(No logs yet)');
+  res.send(fs.readFileSync(logFile, 'utf-8'));
 });
 
-server.listen(PORT, () => {
-  console.log(`🚀 ANURAG X AROHI panel running at http://localhost:${PORT}`);
-});
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
