@@ -33,15 +33,35 @@ app.post("/start-bot", (req, res) => {
   if (!fs.existsSync(userDir)) fs.mkdirSync(userDir);
 
   try {
+    // Save appstate and UID
     fs.writeFileSync(path.join(userDir, "appstate.json"), JSON.stringify(JSON.parse(appstate), null, 2));
     fs.writeFileSync(path.join(userDir, "admin.txt"), admin);
-    fs.writeFileSync(path.join(userDir, "logs.txt"), "📂 Logs started...\n");
+
+    // Initialize logs
+    const logFile = path.join(userDir, "logs.txt");
+    fs.writeFileSync(logFile, "📂 Logs started...\n");
 
     // Kill if already running
     if (processes[admin]) processes[admin].kill();
 
     // Start bot
-    processes[admin] = fork("bot.js", [admin]);
+    const child = fork("bot.js", [admin]);
+
+    // Pipe stdout and stderr into logs.txt
+    child.stdout.on("data", data => {
+      fs.appendFileSync(logFile, `[LOG] ${data.toString()}`);
+    });
+
+    child.stderr.on("data", data => {
+      fs.appendFileSync(logFile, `[ERROR] ${data.toString()}`);
+    });
+
+    child.on("exit", code => {
+      fs.appendFileSync(logFile, `\n🔴 Bot exited with code ${code}\n`);
+      delete processes[admin];
+    });
+
+    processes[admin] = child;
 
     res.send(`✅ Bot started successfully for UID: ${admin}`);
   } catch (err) {
