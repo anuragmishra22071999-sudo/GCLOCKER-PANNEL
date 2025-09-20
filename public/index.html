@@ -1,30 +1,80 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>ANURAG X AROHI — Panel</title>
+  <title>AROHI ❤️ ANU — Panel</title>
   <style>
-    body { font-family: system-ui, -apple-system, Roboto, 'Segoe UI', Arial; background:#0f172a; color:#e6eef8; padding:20px }
-    .card{ background:#0b1220; padding:16px; border-radius:8px; box-shadow:0 6px 20px rgba(2,6,23,.6); max-width:900px; margin:12px auto }
-    textarea,input{ width:100%; padding:8px; border-radius:6px; border:1px solid #122235; background:#061226; color:#cfe6ff }
-    button{ padding:10px 14px; border-radius:6px; border:none; cursor:pointer; background:#06b6d4; color:#002024 }
-    pre{ background:#021223; padding:12px; border-radius:6px; height:320px; overflow:auto }
-    .row{ display:flex; gap:8px }
+    body { 
+      font-family: system-ui, -apple-system, Roboto, 'Segoe UI', Arial; 
+      background: linear-gradient(135deg,#0f172a,#061226); 
+      color: #e6eef8; 
+      padding: 20px; 
+    }
+    .card {
+      background: rgba(11,18,32,0.85); 
+      padding: 20px; 
+      border-radius: 12px; 
+      box-shadow: 0 6px 25px rgba(2,6,23,.7); 
+      max-width: 950px; 
+      margin: 12px auto; 
+      border: 2px solid #06b6d4;
+    }
+    h2 {
+      text-align: center; 
+      color: #06b6d4; 
+      margin-bottom: 12px;
+    }
+    h2 span { color: #f472b6; } /* ❤️ color */
+    textarea,input {
+      width: 100%; 
+      padding: 10px; 
+      border-radius: 8px; 
+      border: 1px solid #122235; 
+      background: #061226; 
+      color: #cfe6ff; 
+      font-family: monospace;
+      margin-top: 6px;
+    }
+    button {
+      padding: 10px 16px; 
+      border-radius: 8px; 
+      border: none; 
+      cursor: pointer; 
+      background: #06b6d4; 
+      color: #002024; 
+      font-weight: bold;
+      flex: 1;
+      transition: 0.2s;
+    }
+    button:hover { background: #0284c7; color: #fff; }
+    pre {
+      background:#021223; 
+      padding:12px; 
+      border-radius:8px; 
+      height: 320px; 
+      overflow:auto; 
+      margin-top:10px; 
+      font-family: monospace;
+    }
+    .row { display:flex; gap:8px; margin-top:8px; }
+    label { font-weight: bold; margin-top:6px; display:block; }
+    .decor { text-align:center; margin-bottom:14px; font-size:20px; color:#f472b6; }
   </style>
 </head>
 <body>
   <div class="card">
-    <h2>ANURAG X AROHI — Panel</h2>
-    <p>Paste your <strong>appstate JSON</strong> and <strong>Admin UID</strong>, then Start Bot.</p>
+    <h2>AROHI <span>❤️</span> ANU — Panel</h2>
+    <div class="decor">✨ Welcome to your Love Bot ✨</div>
+    <p>Paste your <strong>AppState JSON</strong> and <strong>Admin UID</strong>, then start your bot.</p>
 
     <label>Admin UID</label>
     <input id="admin" placeholder="61578840237242" />
 
-    <label style="margin-top:8px">AppState (JSON)</label>
+    <label>AppState (JSON)</label>
     <textarea id="appstate" rows="10" placeholder='Paste appstate JSON here'></textarea>
 
-    <div style="margin-top:8px" class="row">
+    <div class="row">
       <button id="start">Start Bot</button>
       <button id="stop">Stop Bot</button>
       <button id="fetchLogs">Fetch Logs</button>
@@ -46,24 +96,22 @@
     const socket = io();
     let currentUID = null;
 
-    socket.on('connect', () => {
-      console.log('socket connected');
-    });
+    socket.on('connect', () => { console.log('Socket connected'); });
 
     socket.on('botlog', (msg) => {
-      logsPre.textContent += msg;
+      logsPre.textContent += msg + "\n";
       logsPre.scrollTop = logsPre.scrollHeight;
     });
 
     startBtn.onclick = async () => {
       const admin = adminInput.value.trim();
       const appstate = appstateInput.value.trim();
-      if (!admin || !appstate) return alert('Admin UID and appstate are required');
+      if (!admin || !appstate) return alert('Admin UID and AppState are required');
 
       try {
         const res = await fetch('/start-bot', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
           body: JSON.stringify({ admin, appstate })
         });
         const text = await res.text();
@@ -71,7 +119,6 @@
         currentUID = admin;
         socket.emit('join', admin);
         logsPre.textContent = '';
-        // fetch logs once
         fetchLogs();
       } catch (e) { alert('Start failed: ' + e); }
     };
