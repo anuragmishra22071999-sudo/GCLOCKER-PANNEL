@@ -6,6 +6,10 @@
   "scripts": {
     "start": "node index.js"
   },
+  "files": [
+    "index.js",
+    "bot.js"
+  ],
   "dependencies": {
     "express": "^4.18.2",
     "ws3-fca": "^1.0.0",
