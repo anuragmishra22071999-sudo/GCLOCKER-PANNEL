@@ -18,8 +18,8 @@ app.use(express.static('public'));
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-// UID -> child process mapping
-let processes = {};
+// UID -> child process mapping (object itself is const but can be mutated)
+const processes = {};
 
 // Socket.io for live logs
 io.on('connection', (socket) => {
@@ -28,6 +28,7 @@ io.on('connection', (socket) => {
   });
 });
 
+// Append logs to user's logs.txt
 function appendLog(userDir, text) {
   try {
     const logFile = path.join(userDir, 'logs.txt');
@@ -43,8 +44,9 @@ app.post('/start-bot', (req, res) => {
   if (!appstate || !admin) return res.status(400).send('❌ AppState or UID missing');
 
   const userDir = path.join(USERS_DIR, String(admin));
+  // count how many active users (those having appstate.json)
   const currentUsers = fs.readdirSync(USERS_DIR).filter(uid =>
-    fs.existsSync(path.join(USERS_DIR, uid, 'appstate.json'))
+    fs.existsSync(path.join(userDir === undefined ? '' : USERS_DIR, uid, 'appstate.json'))
   );
 
   if (!currentUsers.includes(String(admin)) && currentUsers.length >= MAX_USERS) {
@@ -61,22 +63,22 @@ app.post('/start-bot', (req, res) => {
     const logPath = path.join(userDir, 'logs.txt');
     fs.writeFileSync(logPath, `📂 Logs started at ${new Date().toISOString()}\n`);
 
-    // Kill previous process
+    // Kill previous process if any
     if (processes[admin]) {
       try { processes[admin].kill(); } catch (e) {}
     }
 
-    // Fork bot.js
+    // Fork bot.js for this admin (pass admin UID as arg)
     const child = fork(path.join(__dirname, 'bot.js'), [String(admin)], { silent: true });
 
     child.stdout.on('data', (data) => {
-      const text = data.toString();
+      const text = data.toString().trim();
       appendLog(userDir, text);
       io.to(String(admin)).emit('botlog', text);
     });
 
     child.stderr.on('data', (data) => {
-      const text = data.toString();
+      const text = data.toString().trim();
       appendLog(userDir, `[ERR] ${text}`);
       io.to(String(admin)).emit('botlog', `[ERR] ${text}`);
     });
