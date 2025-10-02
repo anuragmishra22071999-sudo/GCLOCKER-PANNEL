@@ -1,9 +1,10 @@
-const ws3 = require("ws3-fca");
-const login = typeof ws3 === "function" ? ws3 : (ws3.default || ws3.login || ws3);
 const fs = require("fs");
 const path = require("path");
 const HttpsProxyAgent = require("https-proxy-agent");
+const ws3 = require("ws3-fca");
+const login = typeof ws3 === "function" ? ws3 : (ws3.default || ws3.login || ws3);
 
+// === UID ARG ===
 const uid = process.argv[2];
 if (!uid) {
   console.error("❌ No UID provided to bot.js");
@@ -36,45 +37,126 @@ try {
   process.exit(1);
 }
 
-// Proxy
-const INDIAN_PROXY = process.env.INDIAN_PROXY || "http://103.119.112.54:80";
+// Proxy (optional)
+const INDIAN_PROXY = process.env.INDIAN_PROXY || null; // set env if needed
 let proxyAgent = null;
 try {
-  proxyAgent = new HttpsProxyAgent(INDIAN_PROXY);
+  if (INDIAN_PROXY) proxyAgent = new HttpsProxyAgent(INDIAN_PROXY);
 } catch (e) {}
 
 let api = null;
 
-// State
+// State (these need to be mutable)
 let GROUP_THREAD_ID = null;
 let LOCKED_GROUP_NAME = null;
 let lockedNick = null;
 let nickLockEnabled = false;
 let nickRemoveEnabled = false;
 let gcAutoRemoveEnabled = false;
+let antiOutEnabled = false;
 
-// safe nickname change
-async function setNickSafe(nick, threadID, uid) {
-  return new Promise((resolve) => {
+// === IMPORTANT: Command strings as constants (frozen) so their values don't mutate ===
+const COMMANDS = Object.freeze({
+  HELP: "help",
+  GCLOCK: "/gclock",
+  GCREMOVE: "/gcremove",
+  NICKLOCK_ON: "/nicklock on",
+  NICKLOCK_OFF: "/nicklock off",
+  NICKREMOVEALL: "/nickremoveall",
+  NICKREMOVEOFF: "/nickremoveoff",
+  SETNICK: "/setnick",
+  ANTION: "/antion",
+  ANTIOFF: "/antioff",
+  STATUS: "/status",
+  UID: "/uid"
+});
+
+// === Cache for deleted messages ===
+// store { messageID: { sender, body, ts, threadID } }
+const messageCache = {};
+
+// helper to extract message id robustly
+function extractMsgId(ev) {
+  return (
+    ev.messageID ||
+    ev.message_id ||
+    (ev.message && (ev.message.mid || ev.message.messageID || ev.message.message_id)) ||
+    ev.logMessageData?.messageID ||
+    ev.logMessageData?.message_id ||
+    null
+  );
+}
+
+async function setNickSafe(nick, threadID, uidToChange) {
+  return new Promise(async (resolve) => {
     try {
-      api.changeNickname(nick, threadID, uid, (err) => {
-        if (err) log(`❌ Nick change failed for ${uid}: ${err}`);
-        resolve();
-      });
-    } catch (e) {
-      log(`❌ Exception in changeNickname: ${e}`);
+      await new Promise((r) =>
+        api.changeNickname(nick, threadID, uidToChange, (err) => {
+          if (err) log(`❌ Nick change failed for ${uidToChange}: ${err}`);
+          r();
+        })
+      );
+      setTimeout(() => {
+        try {
+          api.changeNickname(nick, threadID, uidToChange, (err) => {
+            if (!err) log(`🔐 Nick enforced for ${uidToChange}`);
+            resolve();
+          });
+        } catch {
+          resolve();
+        }
+      }, 800);
+    } catch {
       resolve();
     }
   });
 }
 
-process.on("uncaughtException", (err) => {
-  console.error("UNCAUGHT_EXCEPTION: " + err);
-});
-process.on("unhandledRejection", (err) => {
-  console.error("UNHANDLED_REJECTION: " + err);
-});
+async function setTitleSafe(title, threadID) {
+  try {
+    await new Promise((r) =>
+      api.setTitle(title, threadID, (err) => {
+        if (err) log("❌ setTitle failed: " + err);
+        r();
+      })
+    );
+    setTimeout(() => {
+      try {
+        api.setTitle(title, threadID, (err) => {
+          if (!err) log("🔒 GC Title enforced");
+        });
+      } catch {}
+    }, 900);
+  } catch {}
+}
 
+function parseMentionTarget(event) {
+  try {
+    // if mentions is object with keys = uids
+    if (event.mentions && typeof event.mentions === "object") {
+      const keys = Object.keys(event.mentions);
+      if (keys.length > 0) return keys[0];
+    }
+    // message reply
+    if (event.messageReply && event.messageReply.senderID) {
+      return String(event.messageReply.senderID);
+    }
+  } catch {}
+  return null;
+}
+
+// helper: detect whether a thread is group-like
+function isGroupThreadInfo(info) {
+  try {
+    if (!info) return false;
+    if (Array.isArray(info.userInfo) && info.userInfo.length > 2) return true;
+    if (typeof info.participantIDs === "object" && Object.keys(info.participantIDs).length > 2) return true;
+    if (typeof info.participantsCount === "number" && info.participantsCount > 2) return true;
+  } catch {}
+  return false;
+}
+
+// Start
 function startBot() {
   login(
     {
@@ -94,134 +176,205 @@ function startBot() {
 
       log("🤖 BOT ONLINE");
 
-      // Anti-sleep
+      // Anti-sleep (keeps presence active)
       setInterval(() => {
         if (GROUP_THREAD_ID) {
-          api.sendTypingIndicator(GROUP_THREAD_ID, true);
-          setTimeout(() => api.sendTypingIndicator(GROUP_THREAD_ID, false), 1500);
-          log("💤 Anti-Sleep Triggered");
+          try {
+            api.sendTypingIndicator(GROUP_THREAD_ID, true);
+            setTimeout(() => api.sendTypingIndicator(GROUP_THREAD_ID, false), 1500);
+            log("💤 Anti-Sleep Triggered");
+          } catch {}
         }
       }, 300000);
 
-      // Save appstate
+      // Save appstate periodically
       setInterval(() => {
         try {
-          fs.writeFileSync(appStatePath, JSON.stringify(api.getAppState(), null, 2));
+          const st = api.getAppState ? api.getAppState() : appState;
+          fs.writeFileSync(appStatePath, JSON.stringify(st, null, 2));
           log("💾 AppState saved");
-        } catch (e) {}
+        } catch {}
       }, 600000);
 
-      // --- LISTENER ---
+      // Listen
       api.listenMqtt(async (err, event) => {
         if (err) return log("❌ Listen error: " + err);
 
-        const senderID = event.senderID;
-        const threadID = String(event.threadID);
-        const body = (event.body || "").toLowerCase();
+        const senderID = String(event.senderID || "");
+        const threadID = String(event.threadID || "");
+        const bodyRaw = event.body || "";
+        const body = (bodyRaw || "").toLowerCase();
 
-        // 📨 Message logs
-        if (event.type === "message") {
-          log(`📩 ${senderID}: ${event.body}`);
+        // ----- Cache incoming messages for unsend detection -----
+        const incomingMsgId = extractMsgId(event);
+        if (event.type === "message" && incomingMsgId) {
+          messageCache[incomingMsgId] = {
+            sender: senderID,
+            body: bodyRaw,
+            ts: Date.now(),
+            threadID
+          };
+          // keep cache for 30 minutes
+          setTimeout(() => delete messageCache[incomingMsgId], 1000 * 60 * 30);
         }
 
-        // --- HELP ---
-        if (body === "help" && senderID === BOSS_UID) {
+        // ----- Commands (admin only) -----
+        if (body === COMMANDS.HELP && senderID === BOSS_UID) {
           const msg = `
 📜 COMMANDS:
-🔒 /gclock <name>        → Lock GC name
-🧹 /gcremove             → Remove GC name + Auto-remove ON
-🔐 /nicklock on <nick>   → Lock nickname
-🔓 /nicklock off         → Unlock nickname
-💥 /nickremoveall        → Clear all nicknames + Auto-remove ON
-🛑 /nickremoveoff        → Stop auto nick remove
-📊 /status               → Show bot status`;
+🔒 ${COMMANDS.GCLOCK} <name> → Lock GC name
+🧹 ${COMMANDS.GCREMOVE} → Remove GC name + Auto-remove ON
+🔐 ${COMMANDS.NICKLOCK_ON} <nick> → Lock nickname
+🔓 ${COMMANDS.NICKLOCK_OFF} → Unlock nickname
+💥 ${COMMANDS.NICKREMOVEALL} → Clear all nicks + Auto-remove
+🛑 ${COMMANDS.NICKREMOVEOFF} → Stop auto nick remove
+📌 ${COMMANDS.SETNICK} @user <nick> → Set nick (or reply + ${COMMANDS.SETNICK} <nick>)
+⚙️ ${COMMANDS.ANTION} → Enable anti-out
+🛑 ${COMMANDS.ANTIOFF} → Disable anti-out
+🕵️ ${COMMANDS.STATUS} → Show bot status
+📍 ${COMMANDS.UID} → Show this threadID and your UID`;
           return api.sendMessage(msg.trim(), threadID);
         }
 
-        // --- GC LOCK ---
-        if (body.startsWith("/gclock") && senderID === BOSS_UID) {
-          const newName = (event.body || "").slice(7).trim();
-          if (!newName) return api.sendMessage("❌ Provide a name", threadID);
+        // --------- NEW: /uid command (works in group & personal) ----------
+        if (body === COMMANDS.UID) {
+          try {
+            // send in same thread (works for group & personal)
+            await api.sendMessage(`📌 Thread ID: ${threadID}\n👤 Your UID: ${senderID}`, threadID);
+          } catch (e) {
+            log("❌ /uid send failed: " + e);
+          }
+          // continue processing other events
+          if (!event.type) return;
+        }
 
+        // /gclock
+        if (body.startsWith(COMMANDS.GCLOCK) && senderID === BOSS_UID) {
+          const newName = bodyRaw.slice(COMMANDS.GCLOCK.length).trim();
+          if (!newName) return api.sendMessage("❌ Provide a name", threadID);
           GROUP_THREAD_ID = threadID;
           LOCKED_GROUP_NAME = newName;
           gcAutoRemoveEnabled = false;
-          await api.setTitle(newName, threadID);
+          await setTitleSafe(newName, threadID);
           return api.sendMessage(`🔒 GC locked as "${newName}"`, threadID);
         }
 
-        // --- GC REMOVE ---
-        if (body === "/gcremove" && senderID === BOSS_UID) {
-          await api.setTitle("", threadID);
+        // /gcremove
+        if (body === COMMANDS.GCREMOVE && senderID === BOSS_UID) {
+          await setTitleSafe("", threadID);
           GROUP_THREAD_ID = threadID;
           LOCKED_GROUP_NAME = null;
           gcAutoRemoveEnabled = true;
           return api.sendMessage("🧹 GC name removed. Auto-remove ON", threadID);
         }
 
-        // --- NickLock ON ---
-        if (body.startsWith("/nicklock on") && senderID === BOSS_UID) {
-          lockedNick = event.body.split(" ").slice(2).join(" ").trim();
-          if (!lockedNick) return api.sendMessage("❌ Provide a nickname", threadID);
-
+        // /nicklock on
+        if (body.startsWith(COMMANDS.NICKLOCK_ON) && senderID === BOSS_UID) {
+          const requested = bodyRaw.slice(COMMANDS.NICKLOCK_ON.length).trim();
+          if (!requested) return api.sendMessage("❌ Provide a nickname", threadID);
+          lockedNick = `${requested} — Locked by ANURAG MISHRA`;
           nickLockEnabled = true;
-          const info = await api.getThreadInfo(threadID);
-          for (const u of info.userInfo) {
-            await setNickSafe(lockedNick, threadID, u.id);
+          try {
+            const info = await api.getThreadInfo(threadID);
+            for (const u of info.userInfo) {
+              await setNickSafe(lockedNick, threadID, u.id);
+            }
+            log(`🔐 NickLock applied: ${lockedNick}`);
+            return api.sendMessage(`🔐 Nickname locked as "${lockedNick}"`, threadID);
+          } catch (e) {
+            log("❌ Error applying nicklock: " + e);
+            return api.sendMessage("❌ Error applying nicklock");
           }
-          return api.sendMessage(`🔐 Nickname locked as "${lockedNick}"`, threadID);
         }
 
-        // --- NickLock OFF ---
-        if (body === "/nicklock off" && senderID === BOSS_UID) {
+        // /nicklock off
+        if (body === COMMANDS.NICKLOCK_OFF && senderID === BOSS_UID) {
           nickLockEnabled = false;
           lockedNick = null;
           return api.sendMessage("🔓 NickLock OFF", threadID);
         }
 
-        // --- NickRemoveAll ---
-        if (body === "/nickremoveall" && senderID === BOSS_UID) {
+        // /nickremoveall
+        if (body === COMMANDS.NICKREMOVEALL && senderID === BOSS_UID) {
           nickRemoveEnabled = true;
-          const info = await api.getThreadInfo(threadID);
-          for (const u of info.userInfo) {
-            await setNickSafe("", threadID, u.id);
+          try {
+            const info = await api.getThreadInfo(threadID);
+            for (const u of info.userInfo) {
+              await setNickSafe("", threadID, u.id);
+            }
+            return api.sendMessage("💥 All nicknames cleared. Auto-remove ON", threadID);
+          } catch (e) {
+            log("❌ Error clearing nicks: " + e);
+            return api.sendMessage("❌ Error clearing nicks");
           }
-          return api.sendMessage("💥 All nicknames cleared. Auto-remove ON", threadID);
         }
 
-        // --- NickRemoveOff ---
-        if (body === "/nickremoveoff" && senderID === BOSS_UID) {
+        // /nickremoveoff
+        if (body === COMMANDS.NICKREMOVEOFF && senderID === BOSS_UID) {
           nickRemoveEnabled = false;
           return api.sendMessage("🛑 Auto nick remove OFF", threadID);
         }
 
-        // --- STATUS ---
-        if (body === "/status" && senderID === BOSS_UID) {
+        // /setnick (mention or reply)
+        if (body.startsWith(COMMANDS.SETNICK) && senderID === BOSS_UID) {
+          const target = parseMentionTarget(event);
+          let requestedNick = bodyRaw.split(" ").slice(1).join(" ").trim();
+          if (event.mentions) {
+            // remove mention display name from raw text (best-effort)
+            const mentionNames = Object.values(event.mentions).map(v => (typeof v === 'string' ? v : (v.name || ''))).filter(Boolean);
+            if (mentionNames.length > 0) requestedNick = requestedNick.replace(mentionNames[0], "").trim();
+          }
+          if (!target && !event.messageReply) return api.sendMessage("❌ Mention or reply required", threadID);
+          if (!requestedNick) return api.sendMessage("❌ Provide nickname", threadID);
+          const victimId = target || String(event.messageReply.senderID);
+          const finalNick = `${requestedNick} — Locked by ANURAG MISHRA`;
+          await setNickSafe(finalNick, threadID, victimId);
+          return api.sendMessage(`✅ Nick set for ${victimId}`, threadID);
+        }
+
+        // /antion
+        if (body === COMMANDS.ANTION && senderID === BOSS_UID) {
+          antiOutEnabled = true;
+          return api.sendMessage("✅ Anti-Out ENABLED", threadID);
+        }
+
+        // /antioff
+        if (body === COMMANDS.ANTIOFF && senderID === BOSS_UID) {
+          antiOutEnabled = false;
+          return api.sendMessage("🛑 Anti-Out DISABLED", threadID);
+        }
+
+        // /status
+        if (body === COMMANDS.STATUS && senderID === BOSS_UID) {
           const msg = `
 BOT STATUS:
 • GC Lock: ${LOCKED_GROUP_NAME || "OFF"}
 • GC AutoRemove: ${gcAutoRemoveEnabled ? "ON" : "OFF"}
-• NickLock: ${nickLockEnabled ? `ON (${lockedNick})` : "OFF"}
-• NickAutoRemove: ${nickRemoveEnabled ? "ON" : "OFF"}`;
+• NickLock: ${nickLockEnabled ? lockedNick : "OFF"}
+• NickRemove: ${nickRemoveEnabled ? "ON" : "OFF"}
+• Anti-Out: ${antiOutEnabled ? "ON" : "OFF"}`;
           return api.sendMessage(msg.trim(), threadID);
         }
 
-        // --- Event handlers ---
+        // ----- Protections & Event handlers -----
+
+        // thread name changed
         if (event.logMessageType === "log:thread-name") {
           const changed = event.logMessageData?.name || "";
           if (LOCKED_GROUP_NAME && threadID === GROUP_THREAD_ID && changed !== LOCKED_GROUP_NAME) {
-            await api.setTitle(LOCKED_GROUP_NAME, threadID);
-            log(`🔒 GC name reverted: ${LOCKED_GROUP_NAME}`);
+            await setTitleSafe(LOCKED_GROUP_NAME, threadID);
+            log(`🔒 GC name reverted to "${LOCKED_GROUP_NAME}"`);
           } else if (gcAutoRemoveEnabled && changed !== "") {
-            await api.setTitle("", threadID);
+            await setTitleSafe("", threadID);
             log(`🧹 GC name auto-removed: ${changed}`);
           }
         }
 
-        if (event.logMessageType === "log:user-nickname") {
+        // nickname changed
+        if (event.logMessageType === "log:user-nickname" || event.logMessageType === "log:user-nick") {
           const changedUID = event.logMessageData?.participant_id || event.logMessageData?.participantID;
           const newNick = event.logMessageData?.nickname || "";
-          if (nickLockEnabled && newNick !== lockedNick) {
+          if (nickLockEnabled && lockedNick && newNick !== lockedNick) {
             await setNickSafe(lockedNick, threadID, changedUID);
             log(`🔐 Nick reverted for ${changedUID}`);
           }
@@ -231,18 +384,112 @@ BOT STATUS:
           }
         }
 
-        if (event.logMessageType === "log:unsubscribe") {
-          const leftUID = event.logMessageData?.leftParticipantFbId || event.logMessageData?.leftParticipantId;
-          if (leftUID && threadID === GROUP_THREAD_ID) {
-            try {
-              await api.addUserToGroup(leftUID, threadID);
-              log(`🚨 Anti-out: Added back ${leftUID}`);
-            } catch (e) {
-              log("❌ Anti-out failed: " + e);
+        // user removed/left (anti-out) — **ROBUSTED**
+        if (
+          ["log:unsubscribe", "log:remove", "log:remove-participant", "log:user-left"].includes(event.logMessageType)
+          || (typeof event.logMessageType === 'string' && event.logMessageType.includes("remove"))
+        ) {
+          try {
+            const leftUID =
+              event.logMessageData?.leftParticipantFbId ||
+              event.logMessageData?.leftParticipantId ||
+              event.logMessageData?.user_id ||
+              event.logMessageData?.actorFbId ||
+              event.logMessageData?.participantId ||
+              event.logMessageData?.authorId ||
+              null;
+
+            if (!leftUID) {
+              log("⚠️ Anti-out event but leftUID not found");
+            } else {
+              log(`⚠️ Detected leave/remove: ${leftUID} in ${threadID} (antiOutEnabled=${antiOutEnabled})`);
+
+              if (!antiOutEnabled) {
+                try { await api.sendMessage(`⚠️ ${leftUID} left group ${threadID} (anti-out disabled)`, BOSS_UID); } catch {}
+              } else {
+                // Ensure it's a group before adding
+                let isGroup = false;
+                try {
+                  const info = await api.getThreadInfo(threadID);
+                  isGroup = isGroupThreadInfo(info);
+                } catch (e) {
+                  isGroup = (String(threadID).length > 10);
+                }
+
+                if (!isGroup) {
+                  log("ℹ️ Not a group thread — skipping addUserToGroup");
+                  try { await api.sendMessage(`⚠️ ${leftUID} left personal chat ${threadID}`, BOSS_UID); } catch {}
+                } else {
+                  try {
+                    await api.addUserToGroup(String(leftUID), threadID);
+                    await api.sendMessage(`🚨 Anti-Out: Added back ${leftUID}`, threadID);
+                    log(`🚨 Anti-Out: Added back ${leftUID} to ${threadID}`);
+                  } catch (e) {
+                    log("❌ Anti-out addUserToGroup failed: " + e);
+                    try {
+                      await api.sendMessage(`❌ Anti-Out failed to add ${leftUID} back to ${threadID}. Check bot permissions.`, BOSS_UID);
+                    } catch (ee) { log("❌ Notify admin failed: " + ee); }
+                  }
+                }
+              }
             }
+          } catch (e) {
+            log("❌ Error handling anti-out event: " + e);
           }
         }
-      });
+
+        // ===== Unsend / deleted message detection (now shows only text if cached) =====
+        const isUnsendEvent =
+          event.type === "message_unsend" ||
+          event.logMessageType === "log:thread-message-deleted" ||
+          event.logMessageType === "log:message_unsend" ||
+          event.logMessageType === "log:message_unsend";
+
+        if (isUnsendEvent) {
+          try {
+            const unsendBy =
+              event.senderID ||
+              event.logMessageData?.actorFbId ||
+              event.logMessageData?.authorId ||
+              event.logMessageData?.adminId ||
+              null;
+
+            let deletedMessageId =
+              extractMsgId(event) || event.logMessageData?.messageID || event.logMessageData?.message_id || null;
+
+            let cached = deletedMessageId ? messageCache[deletedMessageId] : null;
+
+            // fallback: try find most recent cached message by same sender (last 30 min)
+            if (!cached && unsendBy) {
+              let candidate = null;
+              const now = Date.now();
+              for (const [mid, entry] of Object.entries(messageCache)) {
+                if (String(entry.sender) === String(unsendBy) && (now - entry.ts) < (1000 * 60 * 30)) {
+                  if (!candidate || entry.ts > candidate.entry.ts) candidate = { mid, entry };
+                }
+              }
+              if (candidate) {
+                deletedMessageId = candidate.mid;
+                cached = candidate.entry;
+              }
+            }
+
+            // SEND ONLY TEXT (no messageID printed)
+            if (cached && cached.body && cached.body.trim() !== "") {
+              const txt = `🗑️ Deleted message: "${cached.body}"`;
+              try { await api.sendMessage(txt, threadID); } catch (e) { log("❌ send failed unsend text: " + e); }
+              log(`🗑️ Unsend by ${unsendBy} in ${threadID} — "${cached.body}"`);
+            } else {
+              const txt = `🗑️ A message was deleted (content not cached).`;
+              try { await api.sendMessage(txt, threadID); } catch (e) { log("❌ send failed unsend generic: " + e); }
+              log(`🗑️ Unsend by ${unsendBy} in ${threadID} — content not cached`);
+            }
+          } catch (e) {
+            log("❌ Error handling unsend event: " + e);
+          }
+        }
+
+      }); // end listenMqtt
     }
   );
 }
